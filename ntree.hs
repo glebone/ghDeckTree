@@ -24,21 +24,25 @@ import Data.Time
   , getCurrentTimeZone
   , utcToLocalTime
   , toGregorian
-  , fromGregorian -- Fixed here
+  , fromGregorian
   , UTCTime(..)
   , diffUTCTime
   , formatTime
   , defaultTimeLocale
   )
+import Data.Maybe (listToMaybe)
+import Data.List (elemIndex)
 
 --------------------------------------------------------------------------------
 -- Data structure to hold our dynamic program state:
 --  1) Which star index is currently at top
 --  2) A list of placed Toys (row, col, Char)
+--  3) A debug message string (to show what's happening)
 --------------------------------------------------------------------------------
 data ProgramState = ProgramState
-  { starIndex :: Int
-  , toys      :: [(Int, Int, Char)] -- row, col, symbol
+  { starIndex  :: Int
+  , toys       :: [(Int, Int, Char)] -- row, col, symbol
+  , debugMsg   :: String
   } deriving (Show)
 
 --------------------------------------------------------------------------------
@@ -59,11 +63,11 @@ topSymbols =
 --------------------------------------------------------------------------------
 toyBank :: [Char]
 toyBank =
-  [ '⚽','⚾','🥎','🏀','🏐','🏈','🏉','🎾','🎱','🏓'
-  , '🏸','🥏','🪀','🏹','⛸','🪁','✈','🚀','🛸','🏆'
-  , '🎧','🎵','♬','♩','♭','♯','🎶','🎷','🎸','🥁'
-  , '🍎','🍊','🍇','🍒','🍓','🍉','🍀','🌸','🌹','🌻'
-  , '🎃','🎄','💎','💖','⭐','💫','🎁','❄','⚡','🔥'
+  [ '⚽','⚾','🏟','🏀','🏐','🏈','🏉','🎾','🎱'
+  , '🏍','⛸','🚁','🚀','🛸','🏆','🎵','♬','♩'
+  , '♭','♯','🎶','🎷','🎸','🧠','🍎','🍊','🍇'
+  , '🍒','🍓','🍉','🌈','🌸','🌺','🌻','🌱'
+  , '🎄','❄','✨','☆','★','♨','🔥'
   ]
 
 --------------------------------------------------------------------------------
@@ -103,7 +107,7 @@ collectEdges linesOfTree =
     findEdges (row, line) =
       let trimmed = dropWhile (==' ') line
           len     = length line
-          leftIdx  = length line - length trimmed
+          leftIdx  = len - length trimmed
           rightIdx = len - 1 - length (dropWhile (==' ') (reverse line))
       in if leftIdx <= rightIdx
          then [(row, leftIdx) | not (all (==' ') line)]  -- left edge
@@ -123,12 +127,16 @@ main = do
     hideCursor
     clearScreen
 
-    let initialState = ProgramState { starIndex = 0, toys = [] }
+    let initialState = ProgramState
+          { starIndex = 0
+          , toys      = []
+          , debugMsg  = ""
+          }
     loop initialState
 
 --------------------------------------------------------------------------------
 -- The main loop: each iteration:
---   1) Draw everything (tree + countdown + local time + usage)
+--   1) Draw everything (tree + countdown + local time + usage + debug)
 --   2) Wait ~ half a second
 --   3) Check if a key was pressed:
 --        'n' -> next star
@@ -151,9 +159,12 @@ loop state = do
         then do
           c <- getChar
           case c of
-            'n' -> return state { starIndex = (starIndex state + 1) `mod` length topSymbols }
+            'n' -> return state
+              { starIndex = (starIndex state + 1) `mod` length topSymbols
+              , debugMsg  = "Switched to next star."
+              }
             'd' -> addRandomToy state
-            _   -> return state
+            _   -> return state { debugMsg = "No action for key: " ++ show c }
         else return state
 
     -- 4) Clear and repeat
@@ -165,28 +176,35 @@ loop state = do
 --   1) Choose a random symbol from 'toyBank'
 --   2) Choose a random edge from 'treeEdges'
 --   3) Append to the toy list
+--   4) Update debugMsg so we can see which symbol & position was chosen
 --------------------------------------------------------------------------------
 addRandomToy :: ProgramState -> IO ProgramState
-addRandomToy st = do
-    -- Pick random symbol
-    sym <- randomElem toyBank
-    -- Pick random edge
-    (r, c) <- randomElem treeEdges
-    let newToy = (r, c, sym)
-    -- Append to the toy list
-    let newToys = toys st ++ [newToy]
-    return st { toys = newToys }
+addRandomToy st
+  | null toyBank || null treeEdges =
+      return st { debugMsg = "No toy added (empty toyBank or treeEdges)." }
+  | otherwise = do
+      -- Pick random symbol
+      sym <- randomElem toyBank
+      -- Pick random edge
+      (r, c) <- randomElem treeEdges
+      let newToy   = (r, c, sym)
+      let newToys  = toys st ++ [newToy]
+      let dbg      = "Placing symbol '" ++ [sym] ++
+                     "' at (" ++ show r ++ "," ++ show c ++ ")"
+      return st { toys = newToys, debugMsg = dbg }
 
 randomElem :: [a] -> IO a
+randomElem [] = error "Cannot select from an empty list."
 randomElem xs = do
   i <- randomRIO (0, length(xs) - 1)
   return (xs !! i)
 
 --------------------------------------------------------------------------------
--- drawAll: draws the blinking tree, the countdown, the local time, and usage
+-- drawAll: draws the blinking tree, the countdown, the local time, usage, & debug
 --------------------------------------------------------------------------------
 drawAll :: ProgramState -> IO ()
 drawAll st = do
+    -- Build a list of strings (the tree) with the correct star & toys
     let topper   = topSymbols !! starIndex st
     let treeRows = buildTree topper (toys st)
 
@@ -212,109 +230,74 @@ drawAll st = do
     setCursorPosition (usageRow + 1) 0
     putStrLn "Press Ctrl+C to exit."
 
+    -- Finally, draw the debug message
+    let debugRow = usageRow + 2
+    setCursorPosition debugRow 0
+    putStrLn ("Debug: " ++ debugMsg st)
+
 --------------------------------------------------------------------------------
 -- buildTree:
---   1) Replace the top line's star with 'topper'
---   2) For each 'o', create a blinking colored light
---   3) For each toy coordinate, place the toy symbol
---      (toys override the 'o' or space at that position)
---   4) Return a list of "rendered" strings
+--   1) Safely check that treeTemplate is not empty.
+--   2) Replace the top line's star with 'topper'
+--   3) For each 'o', color it green.
+--   4) Place any toys (row, col, symbol).
+--   5) Return the resulting list of strings.
 --------------------------------------------------------------------------------
-buildTree :: String -> [(Int,Int,Char)] -> [String]
-buildTree topper placedToys =
-    [ buildLine row (maybeTemplateLine row) | row <- [0..(length treeTemplate - 1)] ]
+buildTree :: String -> [(Int, Int, Char)] -> [String]
+buildTree _     _        | null treeTemplate = []
+buildTree topper placedT =
+  let
+    -- We know treeTemplate has at least one line:
+    (topLine:restOfTree) = treeTemplate
+
+    -- Replace the star in the first line
+    replacedTopRow = replaceStar topLine topper
+    baseRows       = replacedTopRow : restOfTree
+
+    -- Place each toy in 'placedT'
+    withToys       = foldl placeToy baseRows placedT
+
+    -- Convert 'o' to green ANSI-coded 'o'
+    finalRows      = map colorLights withToys
+  in finalRows
   where
-    buildLine :: Int -> String -> String
-    buildLine row lineTemplate =
-      concatMap (renderChar row) (zip [0..] lineTemplate)
-
-    renderChar :: Int -> (Int, Char) -> String
-    renderChar row0 (col, ch)
-      -- If there's a toy here, use it instead
-      | Just toySym <- lookupToy row0 col = [toySym]
-      | ch == 'o'  = blinkingLight  -- color/light effect
-      | otherwise  = [ch]
-
-    maybeTemplateLine :: Int -> String
-    maybeTemplateLine 0 =
-      -- Overwrite the first row's star
-      replaceStar (head treeTemplate) topper
-    maybeTemplateLine r =
-      treeTemplate !! r
-
-    -- If the original line has an asterisk at position p, replace that with 'topper'.
     replaceStar :: String -> String -> String
-    replaceStar line topSym =
-      case break (=='*') line of
-        (before, '*' : after) -> before ++ topSym ++ after
-        _                     -> line  -- fallback
+    replaceStar line starSym =
+      case elemIndex '*' line of
+        Just idx -> take idx line ++ starSym ++ drop (idx + 1) line
+        Nothing  -> line
 
-    lookupToy :: Int -> Int -> Maybe Char
-    lookupToy r c =
-      case [sym | (rr, cc, sym) <- placedToys, rr == r, cc == c] of
-        (x:_) -> Just x
-        _     -> Nothing
+    placeToy :: [String] -> (Int, Int, Char) -> [String]
+    placeToy rows (r, c, sym)
+      | r < 0 || r >= length rows       = rows
+      | c < 0 || c >= length (rows !! r) = rows
+      | otherwise =
+          let oldLine = rows !! r
+              newLine = take c oldLine ++ [sym] ++ drop (c + 1) oldLine
+          in take r rows ++ [newLine] ++ drop (r + 1) rows
 
---------------------------------------------------------------------------------
--- blinkingLight: returns an ANSI-escaped "o" with random color and blink
--- (We do the random color outside of buildTree to keep it fresh every call)
---------------------------------------------------------------------------------
-blinkingLight :: String
-blinkingLight =
-  -- We'll pick the color each time we encounter 'o'
-  -- for a bit of "variation" in each frame
-  let colors = ["\x1b[32m", "\x1b[33m", "\x1b[31m"] -- green, yellow, red
-      ansiBlink = "\x1b[5m"  -- may not be supported everywhere
-      reset     = "\x1b[0m"
-  in ansiBlink ++ pickColor colors ++ "o" ++ reset
-  where
-    -- For each draw, pick a random color index.
-    -- A cheap hack: use the system clock (no pure RNG in a pure function).
-    -- This is just to demonstrate. For a truly stable color, we'd do IO.
-    pickColor :: [String] -> String
-    pickColor cs =
-      let seedFromClock = 0  -- We'll keep it static in pure code
-      in cs !! (seedFromClock `mod` length cs)
+    colorLights :: String -> String
+    colorLights = concatMap (\ch ->
+      if ch == 'o'
+        then "\x1b[32mo\x1b[0m"  -- green 'o'
+        else [ch]
+      )
 
 --------------------------------------------------------------------------------
--- newYearInfo: returns (countdownString, localTimeString)
+-- newYearInfo: show how many seconds remain until New Year, plus local time
 --------------------------------------------------------------------------------
 newYearInfo :: IO (String, String)
 newYearInfo = do
-    now  <- getCurrentTime
-    zone <- getCurrentTimeZone
-    let localNow = utcToLocalTime zone now
+    now <- getCurrentTime
+    tz  <- getCurrentTimeZone
+    let localTime = utcToLocalTime tz now
+    let timeStr   = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" localTime
 
-    -- Calculate the upcoming New Year (YYYY+1, Jan 1, 00:00:00)
-    let (y,m,d) = toGregorian (toEnum $ fromEnum (utctDay now))
-        nextNY  = fromGregorian (y+1) 1 1
-        nextNYUTC = UTCTime nextNY 0
-        diffSec = realToFrac (diffUTCTime nextNYUTC now) :: Double
+    -- Figure out how many seconds until Jan 1 of next year
+    let (year, _, _)   = toGregorian (utctDay now)
+        nextYear        = fromGregorian (year + 1) 1 1
+        newYearMidnight = UTCTime nextYear 0
+        secsUntil       = floor $ diffUTCTime newYearMidnight now
 
-    let countdownStr = formatCountdown diffSec
-    let timeStr      = "Current time: " ++
-                       formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" localNow
-
-    return (countdownStr, timeStr)
-
---------------------------------------------------------------------------------
--- formatCountdown: given seconds to next NY, produce a string like:
---    "Time to New Year: 31 days 12h 05m 34s"
---------------------------------------------------------------------------------
-formatCountdown :: Double -> String
-formatCountdown secs
-  | secs <= 0  = "Happy New Year!"
-  | otherwise  =
-      let totalSec  = floor secs :: Int
-          days      = totalSec `div` 86400
-          leftover  = totalSec `mod` 86400
-          hours     = leftover `div` 3600
-          leftover2 = leftover `mod` 3600
-          minutes   = leftover2 `div` 60
-          seconds   = leftover2 `mod` 60
-      in  "Time to New Year: "
-          ++ show days ++ "d "
-          ++ show hours ++ "h "
-          ++ show minutes ++ "m "
-          ++ show seconds ++ "s"
-
+    let countdownStr = "Seconds until New Year: " ++ show secsUntil
+    return (countdownStr, "Local time: " ++ timeStr)
