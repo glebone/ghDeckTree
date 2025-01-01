@@ -19,8 +19,9 @@ import System.Console.ANSI
 import System.Random (randomRIO)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_)
-import Data.List (elemIndex)
+import Data.List (elemIndex, elemIndices)
 import Debug.Trace (trace)
+
 
 --------------------------------------------------------------------------------
 -- Data structure to hold our dynamic program state:
@@ -48,7 +49,7 @@ topSymbols =
   ]
 
 --------------------------------------------------------------------------------
--- A bank of 50 possible "toy" symbols. Press 'd' to add one to an edge.
+-- A bank of 50 possible "toy" symbols. Press 'd' to add one to the tree.
 --------------------------------------------------------------------------------
 toyBank :: [Char]
 toyBank =
@@ -60,56 +61,50 @@ toyBank =
   ]
 
 --------------------------------------------------------------------------------
--- The tree lines, but the top row (index 0) will be replaced dynamically by
--- whichever star is currently chosen.
+-- The updated tree lines with two triangles.
 --------------------------------------------------------------------------------
 treeTemplate :: [String]
 treeTemplate =
-  [ "         *         "  -- Will get replaced by dynamic star
-  , "        ***        "
+  [ "         *         "  -- Top star
+  , "        ***        "  -- Top triangle
   , "       *****       "
   , "      *******      "
   , "     *********     "
-  , "    ***********    "
-  , "         o         "
-  , "        o o        "
-  , "       o   o       "
-  , "      o     o      "
-  , "     o       o     "
-  , "    o         o    "
-  , "   o           o   "
-  , "  o  o  o  o  o  o "
-  , "         ###       "
+  , "    ***********    "  -- End of top triangle
+  , "   *************   "  -- Bottom triangle
+  , "  ***************  "
+  , " ***************** "
+  , "         *         "  -- Second top star
+  , "        ***        "  -- Second top triangle
+  , "       *****       "
+  , "      *******      "
+  , "     *********     "
+  , "    ***********    "  -- End of second top triangle
+  , "   *************   "  -- Second bottom triangle
+  , "  ***************  "
+  , " ***************** "
+  , "*******************"
+  , "*********************"
+  , "         ###       "  -- Tree trunk
   ]
 
 --------------------------------------------------------------------------------
--- Let's define a list of "edges" in the tree (row,col) so that toys can appear
--- on the leftmost or rightmost non-space character in each row.
+-- Let's define a list of all `*` positions in the tree where toys can appear.
 --------------------------------------------------------------------------------
-treeEdges :: [(Int, Int)]
-treeEdges = collectEdges treeTemplate
+treeStars :: [(Int, Int)]
+treeStars = collectStars treeTemplate
 
-collectEdges :: [String] -> [(Int, Int)]
-collectEdges linesOfTree =
-  concatMap findEdges (zip [0..] linesOfTree)
+collectStars :: [String] -> [(Int, Int)]
+collectStars linesOfTree =
+  concatMap findStars (zip [0..] linesOfTree)
   where
-    findEdges (row, line) =
-      let trimmed = dropWhile (==' ') line
-          len     = length line
-          leftIdx  = len - length trimmed
-          rightIdx = len - 1 - length (dropWhile (==' ') (reverse line))
-          edges    = [(row, leftIdx) | not (all (==' ') line)] ++
-                     [(row, rightIdx) | rightIdx > leftIdx]
-      in trace ("Row " ++ show row ++ ": line=" ++ show line ++
-                ", edges=" ++ show edges) edges
+    findStars (row, line) = [(row, col) | col <- elemIndices '*' line]
 
 --------------------------------------------------------------------------------
 -- buildTree:
 --   1) Replace the top line's star with 'topper'
---   2) For each 'o', create a blinking colored light (green in this example)
---   3) For each toy coordinate, place the toy symbol
---      (toys override any 'o' or '*' at that position)
---   4) Return a list of "rendered" strings
+--   2) Place any toys at specific positions
+--   3) Return a list of "rendered" strings
 --------------------------------------------------------------------------------
 buildTree :: String -> [(Int, Int, Char)] -> [String]
 buildTree _     _        | null treeTemplate = []
@@ -124,10 +119,7 @@ buildTree topper placedT =
 
     -- Place each toy in 'placedT'
     withToys       = foldl placeToy baseRows placedT
-
-    -- Convert 'o' to green ANSI-coded 'o'
-    finalRows      = map colorLights withToys
-  in finalRows
+  in withToys
   where
     replaceStar :: String -> String -> String
     replaceStar line starSym =
@@ -144,24 +136,14 @@ buildTree topper placedT =
               newLine = take c oldLine ++ [sym] ++ drop (c + 1) oldLine
           in take r rows ++ [newLine] ++ drop (r + 1) rows
 
-    colorLights :: String -> String
-    colorLights = concatMap (\ch ->
-      if ch == 'o'
-        then "\x1b[32mo\x1b[0m"  -- green 'o'
-        else [ch]
-      )
-
 --------------------------------------------------------------------------------
 -- Main entry: set up non-blocking input, then run the loop with initial state.
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
-    -- Debug: Print toyBank
-    putStrLn "Debug: ToyBank contents:"
-    print toyBank
-    -- Debug: Print treeEdges
-    putStrLn "Debug: Calculated treeEdges:"
-    print treeEdges
+    -- Debug: Print treeStars
+    putStrLn "Debug: Available star positions:"
+    print treeStars
 
     -- Turn off buffering and echo so we can read single chars without blocking
     hSetBuffering stdin NoBuffering
@@ -180,7 +162,7 @@ main = do
 
 --------------------------------------------------------------------------------
 -- The main loop: each iteration:
---   1) Draw everything (tree + countdown + usage + debug)
+--   1) Draw everything (tree + usage + debug)
 --   2) Wait ~ half a second
 --   3) Check if a key was pressed:
 --        'n' -> next star
@@ -217,24 +199,22 @@ loop state = do
 
 --------------------------------------------------------------------------------
 -- addRandomToy:
---   1) Choose a random symbol from 'toyBank'
---   2) Choose a random edge from 'treeEdges'
+--   1) Choose a random position from `treeStars`
+--   2) Choose a random symbol from `toyBank`
 --   3) Append to the toy list
---   4) Update debugMsg so we can see which symbol & position was chosen
 --------------------------------------------------------------------------------
 addRandomToy :: ProgramState -> IO ProgramState
 addRandomToy st
   | null toyBank = return st { debugMsg = "No toy added (toyBank is empty)." }
-  | null treeEdges = return st { debugMsg = "No toy added (treeEdges is empty)." }
+  | null treeStars = return st { debugMsg = "No toy added (no stars available)." }
   | otherwise = do
-      -- Pick random symbol
+      -- Pick a random position
+      (r, c) <- randomElem treeStars
+      -- Pick a random toy
       sym <- randomElem toyBank
-      -- Pick random edge
-      (r, c) <- randomElem treeEdges
       let newToy   = (r, c, sym)
       let newToys  = toys st ++ [newToy]
-      let dbg      = "Placing symbol '" ++ [sym] ++
-                     "' at (" ++ show r ++ "," ++ show c ++ ")"
+      let dbg      = "Placing symbol '" ++ [sym] ++ "' at (" ++ show r ++ "," ++ show c ++ ")"
       return st { toys = newToys, debugMsg = dbg }
 
 randomElem :: [a] -> IO a
@@ -244,7 +224,7 @@ randomElem xs = do
   return (xs !! i)
 
 --------------------------------------------------------------------------------
--- drawAll: draws the blinking tree, the usage, and the debug message
+-- drawAll: draws the tree and usage instructions
 --------------------------------------------------------------------------------
 drawAll :: ProgramState -> IO ()
 drawAll st = do
