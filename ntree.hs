@@ -19,19 +19,8 @@ import System.Console.ANSI
 import System.Random (randomRIO)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_)
-import Data.Time
-  ( getCurrentTime
-  , getCurrentTimeZone
-  , utcToLocalTime
-  , toGregorian
-  , fromGregorian
-  , UTCTime(..)
-  , diffUTCTime
-  , formatTime
-  , defaultTimeLocale
-  )
-import Data.Maybe (listToMaybe)
 import Data.List (elemIndex)
+import Debug.Trace (trace)
 
 --------------------------------------------------------------------------------
 -- Data structure to hold our dynamic program state:
@@ -109,16 +98,71 @@ collectEdges linesOfTree =
           len     = length line
           leftIdx  = len - length trimmed
           rightIdx = len - 1 - length (dropWhile (==' ') (reverse line))
-      in if leftIdx <= rightIdx
-         then [(row, leftIdx) | not (all (==' ') line)]  -- left edge
-           ++ [(row, rightIdx) | rightIdx > leftIdx]      -- right edge
-         else []
+          edges    = [(row, leftIdx) | not (all (==' ') line)] ++
+                     [(row, rightIdx) | rightIdx > leftIdx]
+      in trace ("Row " ++ show row ++ ": line=" ++ show line ++
+                ", edges=" ++ show edges) edges
+
+--------------------------------------------------------------------------------
+-- buildTree:
+--   1) Replace the top line's star with 'topper'
+--   2) For each 'o', create a blinking colored light (green in this example)
+--   3) For each toy coordinate, place the toy symbol
+--      (toys override any 'o' or '*' at that position)
+--   4) Return a list of "rendered" strings
+--------------------------------------------------------------------------------
+buildTree :: String -> [(Int, Int, Char)] -> [String]
+buildTree _     _        | null treeTemplate = []
+buildTree topper placedT =
+  let
+    -- We know treeTemplate has at least one line:
+    (topLine:restOfTree) = treeTemplate
+
+    -- Replace the star in the first line
+    replacedTopRow = replaceStar topLine topper
+    baseRows       = replacedTopRow : restOfTree
+
+    -- Place each toy in 'placedT'
+    withToys       = foldl placeToy baseRows placedT
+
+    -- Convert 'o' to green ANSI-coded 'o'
+    finalRows      = map colorLights withToys
+  in finalRows
+  where
+    replaceStar :: String -> String -> String
+    replaceStar line starSym =
+      case elemIndex '*' line of
+        Just idx -> take idx line ++ starSym ++ drop (idx + 1) line
+        Nothing  -> line
+
+    placeToy :: [String] -> (Int, Int, Char) -> [String]
+    placeToy rows (r, c, sym)
+      | r < 0 || r >= length rows = rows
+      | c < 0 || c >= length (rows !! r) = rows
+      | otherwise =
+          let oldLine = rows !! r
+              newLine = take c oldLine ++ [sym] ++ drop (c + 1) oldLine
+          in take r rows ++ [newLine] ++ drop (r + 1) rows
+
+    colorLights :: String -> String
+    colorLights = concatMap (\ch ->
+      if ch == 'o'
+        then "\x1b[32mo\x1b[0m"  -- green 'o'
+        else [ch]
+      )
 
 --------------------------------------------------------------------------------
 -- Main entry: set up non-blocking input, then run the loop with initial state.
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
+    -- Debug: Print toyBank
+    putStrLn "Debug: ToyBank contents:"
+    print toyBank
+    -- Debug: Print treeEdges
+    putStrLn "Debug: Calculated treeEdges:"
+    print treeEdges
+
     -- Turn off buffering and echo so we can read single chars without blocking
     hSetBuffering stdin NoBuffering
     hSetEcho stdin False
@@ -136,7 +180,7 @@ main = do
 
 --------------------------------------------------------------------------------
 -- The main loop: each iteration:
---   1) Draw everything (tree + countdown + local time + usage + debug)
+--   1) Draw everything (tree + countdown + usage + debug)
 --   2) Wait ~ half a second
 --   3) Check if a key was pressed:
 --        'n' -> next star
@@ -180,8 +224,8 @@ loop state = do
 --------------------------------------------------------------------------------
 addRandomToy :: ProgramState -> IO ProgramState
 addRandomToy st
-  | null toyBank || null treeEdges =
-      return st { debugMsg = "No toy added (empty toyBank or treeEdges)." }
+  | null toyBank = return st { debugMsg = "No toy added (toyBank is empty)." }
+  | null treeEdges = return st { debugMsg = "No toy added (treeEdges is empty)." }
   | otherwise = do
       -- Pick random symbol
       sym <- randomElem toyBank
@@ -200,11 +244,10 @@ randomElem xs = do
   return (xs !! i)
 
 --------------------------------------------------------------------------------
--- drawAll: draws the blinking tree, the countdown, the local time, usage, & debug
+-- drawAll: draws the blinking tree, the usage, and the debug message
 --------------------------------------------------------------------------------
 drawAll :: ProgramState -> IO ()
 drawAll st = do
-    -- Build a list of strings (the tree) with the correct star & toys
     let topper   = topSymbols !! starIndex st
     let treeRows = buildTree topper (toys st)
 
@@ -213,91 +256,7 @@ drawAll st = do
       setCursorPosition row 0
       putStr line
 
-    -- Then draw the countdown and current time
-    (countdownStr, timeStr) <- newYearInfo
-    let countdownRow = length treeRows + 1
-    setCursorPosition countdownRow 0
-    putStrLn countdownStr
-
-    let timeRow = countdownRow + 1
-    setCursorPosition timeRow 0
-    putStrLn timeStr
-
-    -- Then draw usage instructions
-    let usageRow = timeRow + 2
-    setCursorPosition usageRow 0
-    putStrLn "Press 'n' to change the star topper, 'd' to add a random toy."
-    setCursorPosition (usageRow + 1) 0
-    putStrLn "Press Ctrl+C to exit."
-
-    -- Finally, draw the debug message
-    let debugRow = usageRow + 2
+    -- Draw debug message
+    let debugRow = length treeRows + 1
     setCursorPosition debugRow 0
     putStrLn ("Debug: " ++ debugMsg st)
-
---------------------------------------------------------------------------------
--- buildTree:
---   1) Safely check that treeTemplate is not empty.
---   2) Replace the top line's star with 'topper'
---   3) For each 'o', color it green.
---   4) Place any toys (row, col, symbol).
---   5) Return the resulting list of strings.
---------------------------------------------------------------------------------
-buildTree :: String -> [(Int, Int, Char)] -> [String]
-buildTree _     _        | null treeTemplate = []
-buildTree topper placedT =
-  let
-    -- We know treeTemplate has at least one line:
-    (topLine:restOfTree) = treeTemplate
-
-    -- Replace the star in the first line
-    replacedTopRow = replaceStar topLine topper
-    baseRows       = replacedTopRow : restOfTree
-
-    -- Place each toy in 'placedT'
-    withToys       = foldl placeToy baseRows placedT
-
-    -- Convert 'o' to green ANSI-coded 'o'
-    finalRows      = map colorLights withToys
-  in finalRows
-  where
-    replaceStar :: String -> String -> String
-    replaceStar line starSym =
-      case elemIndex '*' line of
-        Just idx -> take idx line ++ starSym ++ drop (idx + 1) line
-        Nothing  -> line
-
-    placeToy :: [String] -> (Int, Int, Char) -> [String]
-    placeToy rows (r, c, sym)
-      | r < 0 || r >= length rows       = rows
-      | c < 0 || c >= length (rows !! r) = rows
-      | otherwise =
-          let oldLine = rows !! r
-              newLine = take c oldLine ++ [sym] ++ drop (c + 1) oldLine
-          in take r rows ++ [newLine] ++ drop (r + 1) rows
-
-    colorLights :: String -> String
-    colorLights = concatMap (\ch ->
-      if ch == 'o'
-        then "\x1b[32mo\x1b[0m"  -- green 'o'
-        else [ch]
-      )
-
---------------------------------------------------------------------------------
--- newYearInfo: show how many seconds remain until New Year, plus local time
---------------------------------------------------------------------------------
-newYearInfo :: IO (String, String)
-newYearInfo = do
-    now <- getCurrentTime
-    tz  <- getCurrentTimeZone
-    let localTime = utcToLocalTime tz now
-    let timeStr   = formatTime defaultTimeLocale "%Y-%m-%d %H:%M:%S" localTime
-
-    -- Figure out how many seconds until Jan 1 of next year
-    let (year, _, _)   = toGregorian (utctDay now)
-        nextYear        = fromGregorian (year + 1) 1 1
-        newYearMidnight = UTCTime nextYear 0
-        secsUntil       = floor $ diffUTCTime newYearMidnight now
-
-    let countdownStr = "Seconds until New Year: " ++ show secsUntil
-    return (countdownStr, "Local time: " ++ timeStr)
