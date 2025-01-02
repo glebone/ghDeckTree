@@ -15,6 +15,11 @@ import System.Console.ANSI
   , setCursorPosition
   , hideCursor
   , showCursor
+  , setSGR
+  , SGR(..)
+  , ConsoleLayer(..)
+  , ColorIntensity(..)
+  , Color(..)
   )
 import System.Random (randomRIO)
 import Control.Concurrent (threadDelay)
@@ -231,10 +236,15 @@ drawAll st = do
     let topper   = topSymbols !! starIndex st
     let treeRows = buildTree topper (toys st)
 
+    setSGR [SetColor Foreground Vivid Green]
+
+
     -- Draw the tree
     forM_ (zip [0..] treeRows) $ \(row, line) -> do
       setCursorPosition row 0
       putStr line
+
+    setSGR [Reset]
 
     -- Draw debug message
     let debugRow = length treeRows + 1
