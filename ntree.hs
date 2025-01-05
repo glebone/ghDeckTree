@@ -25,20 +25,10 @@ import System.Random (randomRIO)
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_)
 import Data.List (elemIndex, elemIndices)
-import Debug.Trace (trace)
+import System.Environment (getArgs)
 
-
---------------------------------------------------------------------------------
--- Data structure to hold our dynamic program state:
---  1) Which star index is currently at top
---  2) A list of placed Toys (row, col, Char)
---  3) A debug message string (to show what's happening)
---------------------------------------------------------------------------------
-data ProgramState = ProgramState
-  { starIndex  :: Int
-  , toys       :: [(Int, Int, Char)] -- row, col, symbol
-  , debugMsg   :: String
-  } deriving (Show)
+import ProgramState (ProgramState(..))
+import TreeSerialize (saveProgramState, loadProgramState)
 
 --------------------------------------------------------------------------------
 -- A list of possible tree toppers. Press 'n' to cycle.
@@ -49,8 +39,8 @@ topSymbols =
   , "★"   -- Black Star (U+2605)
   , "🌟"  -- Glowing Star (U+1F31F)
   , "✨"  -- Sparkles (U+2728)
-  , "☆"  -- White Star (U+2606)
-  , "❇"  -- Sparkle (U+2747)
+  , "☆"   -- White Star (U+2606)
+  , "❇"   -- Sparkle (U+2747)
   ]
 
 --------------------------------------------------------------------------------
@@ -115,14 +105,9 @@ buildTree :: String -> [(Int, Int, Char)] -> [String]
 buildTree _     _        | null treeTemplate = []
 buildTree topper placedT =
   let
-    -- We know treeTemplate has at least one line:
     (topLine:restOfTree) = treeTemplate
-
-    -- Replace the star in the first line
     replacedTopRow = replaceStar topLine topper
     baseRows       = replacedTopRow : restOfTree
-
-    -- Place each toy in 'placedT'
     withToys       = foldl placeToy baseRows placedT
   in withToys
   where
@@ -134,7 +119,7 @@ buildTree topper placedT =
 
     placeToy :: [String] -> (Int, Int, Char) -> [String]
     placeToy rows (r, c, sym)
-      | r < 0 || r >= length rows = rows
+      | r < 0 || r >= length rows         = rows
       | c < 0 || c >= length (rows !! r) = rows
       | otherwise =
           let oldLine = rows !! r
@@ -142,11 +127,24 @@ buildTree topper placedT =
           in take r rows ++ [newLine] ++ drop (r + 1) rows
 
 --------------------------------------------------------------------------------
--- Main entry: set up non-blocking input, then run the loop with initial state.
+-- main: set up non-blocking input, load initial state, then run the loop.
 --------------------------------------------------------------------------------
 main :: IO ()
 main = do
-    -- Debug: Print treeStars
+    -- Check for command-line arguments to optionally load a .ntr file
+    args <- getArgs
+    loadedState <- case args of
+      (filePath:_) -> do
+        putStrLn $ "Loading tree configuration from " ++ filePath
+        loadProgramState filePath
+      _ -> do
+        putStrLn "No .ntr file specified, using a fresh tree."
+        return ProgramState
+          { starIndex = 0
+          , toys      = []
+          , debugMsg  = ""
+          }
+
     putStrLn "Debug: Available star positions:"
     print treeStars
 
@@ -158,29 +156,17 @@ main = do
     hideCursor
     clearScreen
 
-    let initialState = ProgramState
-          { starIndex = 0
-          , toys      = []
-          , debugMsg  = ""
-          }
-    loop initialState
+    loop loadedState
 
 --------------------------------------------------------------------------------
--- The main loop: each iteration:
---   1) Draw everything (tree + usage + debug)
---   2) Wait ~ half a second
---   3) Check if a key was pressed:
---        'n' -> next star
---        'd' -> place a random toy
---      otherwise no change
---   4) Clear screen, repeat
+-- The main loop: draw, wait, check input, update state, repeat.
 --------------------------------------------------------------------------------
 loop :: ProgramState -> IO ()
 loop state = do
-    -- 1) Draw
+    -- 1) Draw everything
     drawAll state
 
-    -- 2) Wait half a second
+    -- 2) Wait ~ half a second
     threadDelay 500000
 
     -- 3) Check if a key was pressed
@@ -195,37 +181,37 @@ loop state = do
               , debugMsg  = "Switched to next star."
               }
             'd' -> addRandomToy state
+            's' -> do
+              -- Save the current state to "tree.ntr"
+              saveProgramState "tree.ntr" state
+              return state { debugMsg = "Saved tree to tree.ntr" }
             _   -> return state { debugMsg = "No action for key: " ++ show c }
         else return state
 
-    -- 4) Clear and repeat
+    -- 4) Clear screen and repeat
     clearScreen
     loop newState
 
 --------------------------------------------------------------------------------
--- addRandomToy:
---   1) Choose a random position from `treeStars`
---   2) Choose a random symbol from `toyBank`
---   3) Append to the toy list
+-- Add a random toy from the toyBank to one of the '*' in the tree.
 --------------------------------------------------------------------------------
 addRandomToy :: ProgramState -> IO ProgramState
 addRandomToy st
-  | null toyBank = return st { debugMsg = "No toy added (toyBank is empty)." }
-  | null treeStars = return st { debugMsg = "No toy added (no stars available)." }
+  | null toyBank    = return st { debugMsg = "No toy added (toyBank is empty)." }
+  | null treeStars  = return st { debugMsg = "No toy added (no stars available)." }
   | otherwise = do
-      -- Pick a random position
       (r, c) <- randomElem treeStars
-      -- Pick a random toy
-      sym <- randomElem toyBank
-      let newToy   = (r, c, sym)
-      let newToys  = toys st ++ [newToy]
-      let dbg      = "Placing symbol '" ++ [sym] ++ "' at (" ++ show r ++ "," ++ show c ++ ")"
-      return st { toys = newToys, debugMsg = dbg }
+      sym    <- randomElem toyBank
+      let newToy = (r, c, sym)
+      return st
+        { toys    = toys st ++ [newToy]
+        , debugMsg = "Placing symbol '" ++ [sym] ++ "' at (" ++ show r ++ "," ++ show c ++ ")"
+        }
 
 randomElem :: [a] -> IO a
 randomElem [] = error "Cannot select from an empty list."
 randomElem xs = do
-  i <- randomRIO (0, length(xs) - 1)
+  i <- randomRIO (0, length xs - 1)
   return (xs !! i)
 
 --------------------------------------------------------------------------------
@@ -238,7 +224,6 @@ drawAll st = do
 
     setSGR [SetColor Foreground Vivid Green]
 
-
     -- Draw the tree
     forM_ (zip [0..] treeRows) $ \(row, line) -> do
       setCursorPosition row 0
@@ -246,7 +231,11 @@ drawAll st = do
 
     setSGR [Reset]
 
-    -- Draw debug message
-    let debugRow = length treeRows + 1
+    -- Optional usage line
+    let usageRow = length treeRows
+    setCursorPosition usageRow 0
+    putStrLn "Press n=next star, d=add toy, s=save, Ctrl+C=quit"
+
+    let debugRow = usageRow + 1
     setCursorPosition debugRow 0
     putStrLn ("Debug: " ++ debugMsg st)
